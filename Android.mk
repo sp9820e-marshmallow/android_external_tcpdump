@@ -43,7 +43,7 @@ LOCAL_C_INCLUDES += \
 	$(LOCAL_PATH)/missing\
 	external/libpcap
 
-LOCAL_SHARED_LIBRARIES += libssl libcrypto
+LOCAL_SHARED_LIBRARIES += libssl libcrypto liblog
 
 LOCAL_STATIC_LIBRARIES += libpcap
 

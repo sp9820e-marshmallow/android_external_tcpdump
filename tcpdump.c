@@ -91,6 +91,76 @@ extern int SIZE_BUF;
 #define PATH_MAX 1024
 #endif
 
+#ifdef ANDROID
+#define LOG_TAG "tcpdump"
+#include "cutils/log.h"
+#if 0
+#define ytag_debug SLOGW
+#else
+#define ytag_debug(msg...) {}
+#endif
+#else
+#define ytag_debug(msg...) {}
+#endif
+#include "ytagf.h"
+static struct ytag ytag = {0};
+static int create_ytag_info = 0;
+static int ytag_tcpdump_index = 0;
+static int ytag_tcpdump_size = 0;
+static pcap_dumper_t *PCAP_DUMP_OPEN(pcap_t *pd, const char *fname) {
+    char file_name[PATH_MAX] = {0};
+    pcap_dumper_t *p;
+    if (fname[0] == '-' && fname[1] == '\0')
+        create_ytag_info = 1;
+    if (create_ytag_info) {
+        char *yp, *ype;
+        struct tm timenow, *ptm;
+        struct timeval tv;
+        yp = file_name;
+        ype = yp + sizeof(file_name);
+        yp += snprintf(yp, ype - yp, "%05d.", ytag_tcpdump_index++);
+        gettimeofday(&tv, NULL);
+        ptm = localtime_r(&tv.tv_sec, &timenow);
+        strftime(yp, ype - yp, "tcpdump.%Y-%m-%d_%H.%M.%S.cap", ptm);
+        ytag_newfile_begin(file_name);
+        ytag_rawdata_len(sizeof(struct pcap_file_header));
+        fname = "-";
+    }
+    p = pcap_dump_open(pd, fname);
+    if (create_ytag_info)
+        ytag_debug("%s %s stdout=%p, p=%p, %s, %s\n", __func__, file_name, stdout, p, fname, pcap_geterr(pd));
+    return p;
+}
+
+static void PCAP_DUMP_CLOSE(pcap_dumper_t *p) {
+    if (create_ytag_info) {
+        ytag_newfile_end(NULL);
+        ytag_tcpdump_size = 0;
+        ytag_debug("%s stdout=%p, p=%p\n", __func__, stdout, p);
+    }
+    if ((FILE *)p != stdout)
+        pcap_dump_close(p);
+}
+
+void PCAP_DUMP(u_char *user, const struct pcap_pkthdr *h, const u_char *sp) {
+    struct pcap_timeval {
+        bpf_int32 tv_sec;       /* seconds */
+        bpf_int32 tv_usec;      /* microseconds */
+    };
+    struct pcap_sf_pkthdr {
+        struct pcap_timeval ts; /* time stamp */
+        bpf_u_int32 caplen;     /* length of portion present */
+        bpf_u_int32 len;        /* length this packet (off wire) */
+    };
+    if (create_ytag_info) {
+        int dlen = sizeof(struct pcap_sf_pkthdr) + h->caplen;
+        ytag_rawdata_len(dlen);
+        ytag_tcpdump_size += dlen;
+        ytag_debug("%s dlen=%d, ytag_tcpdump_size=%d, stdout=%p, p=%p\n", __func__, dlen, ytag_tcpdump_size, stdout, user);
+    }
+    pcap_dump(user, h, sp);
+}
+
 #ifdef SIGINFO
 #define SIGNAL_REQ_INFO SIGINFO
 #elif SIGUSR1
@@ -1492,7 +1562,7 @@ main(int argc, char **argv)
 		else
 		  MakeFilename(dumpinfo.CurrentFileName, WFileName, 0, 0);
 
-		p = pcap_dump_open(pd, dumpinfo.CurrentFileName);
+		p = PCAP_DUMP_OPEN(pd, dumpinfo.CurrentFileName);
 #ifdef HAVE_CAP_NG_H
         /* Give up capabilities, clear Effective set */
         capng_clear(CAPNG_EFFECTIVE);
@@ -1821,7 +1891,7 @@ dump_packet_and_trunc(u_char *user, const struct pcap_pkthdr *h, const u_char *s
 			/*
 			 * Close the current file and open a new one.
 			 */
-			pcap_dump_close(dump_info->p);
+			PCAP_DUMP_CLOSE(dump_info->p);
 
 			/*
 			 * Compress the file we just closed, if the user asked for it
@@ -1860,7 +1930,7 @@ dump_packet_and_trunc(u_char *user, const struct pcap_pkthdr *h, const u_char *s
 			capng_update(CAPNG_ADD, CAPNG_EFFECTIVE, CAP_DAC_OVERRIDE);
 			capng_apply(CAPNG_EFFECTIVE);
 #endif /* HAVE_CAP_NG_H */
-			dump_info->p = pcap_dump_open(dump_info->pd, dump_info->CurrentFileName);
+			dump_info->p = PCAP_DUMP_OPEN(dump_info->pd, dump_info->CurrentFileName);
 #ifdef HAVE_CAP_NG_H
 			capng_update(CAPNG_DROP, CAPNG_EFFECTIVE, CAP_DAC_OVERRIDE);
 			capng_apply(CAPNG_EFFECTIVE);
@@ -1875,11 +1945,12 @@ dump_packet_and_trunc(u_char *user, const struct pcap_pkthdr *h, const u_char *s
 	 * larger than Cflag - the last packet written to the
 	 * file could put it over Cflag.
 	 */
-	if (Cflag != 0 && pcap_dump_ftell(dump_info->p) > Cflag) {
+	if (Cflag != 0 && (((create_ytag_info == 0) && (pcap_dump_ftell(dump_info->p) > Cflag)) ||
+                ((create_ytag_info == 1) && (ytag_tcpdump_size > Cflag)))) {
 		/*
 		 * Close the current file and open a new one.
 		 */
-		pcap_dump_close(dump_info->p);
+		PCAP_DUMP_CLOSE(dump_info->p);
 
 		/*
 		 * Compress the file we just closed, if the user asked for it
@@ -1898,12 +1969,12 @@ dump_packet_and_trunc(u_char *user, const struct pcap_pkthdr *h, const u_char *s
 		if (dump_info->CurrentFileName == NULL)
 			error("dump_packet_and_trunc: malloc");
 		MakeFilename(dump_info->CurrentFileName, dump_info->WFileName, Cflag_count, WflagChars);
-		dump_info->p = pcap_dump_open(dump_info->pd, dump_info->CurrentFileName);
+		dump_info->p = PCAP_DUMP_OPEN(dump_info->pd, dump_info->CurrentFileName);
 		if (dump_info->p == NULL)
 			error("%s", pcap_geterr(pd));
 	}
 
-	pcap_dump((u_char *)dump_info->p, h, sp);
+	PCAP_DUMP((u_char *)dump_info->p, h, sp);
 #ifdef HAVE_PCAP_DUMP_FLUSH
 	if (Uflag)
 		pcap_dump_flush(dump_info->p);
@@ -1921,7 +1992,7 @@ dump_packet(u_char *user, const struct pcap_pkthdr *h, const u_char *sp)
 
 	++infodelay;
 
-	pcap_dump(user, h, sp);
+	PCAP_DUMP(user, h, sp);
 #ifdef HAVE_PCAP_DUMP_FLUSH
 	if (Uflag)
 		pcap_dump_flush((pcap_dumper_t *)user);
